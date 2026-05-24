@@ -6,11 +6,8 @@ import sys
 import json
 import google.generativeai as genai
 
-# Fix for Vercel serverless environment paths context
-# This forces Python to look inside the api/ folder for local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Now Python can locate the agents package cleanly
 from agents import (
     get_market_prompt, get_market_fallback,
     get_tech_prompt, get_tech_fallback,
@@ -19,7 +16,6 @@ from agents import (
 )
 
 app = FastAPI()
-# Keep all the remaining endpoints and model definitions exactly as they were...
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,10 +25,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class BaselineInput(BaseModel):
     idea: str
     background: str
     location: str
+
 
 class EvaluationInput(BaseModel):
     idea: str
@@ -43,6 +41,7 @@ class EvaluationInput(BaseModel):
     finance_answer: str
     critique_answer: str
 
+
 def get_gemini_client():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -50,15 +49,19 @@ def get_gemini_client():
     genai.configure(api_key=api_key)
     return genai.GenerativeModel("gemini-1.5-flash")
 
+
 @app.get("/api/health")
 def health():
-    return {"status": "active", "key_configured": os.environ.get("GEMINI_API_KEY") is not None}
+    return {
+        "status": "active",
+        "key_configured": os.environ.get("GEMINI_API_KEY") is not None
+    }
+
 
 @app.post("/api/generate-questions")
 async def generate_questions(data: BaselineInput):
     ai_model = get_gemini_client()
-    
-    # Error-Proof Fallback System using modular agents
+
     if not ai_model:
         return {
             "market_question": get_market_fallback(data.location),
@@ -66,67 +69,106 @@ async def generate_questions(data: BaselineInput):
             "finance_question": get_finance_fallback(),
             "critique_question": get_critique_fallback()
         }
-    
-    # Constructing a unified collaborative prompt pulling from individual agent profiles
-    prompt = f"""
-    You are a panel of 4 startup experts analyzing a founder's initial idea.
-    
-    {get_market_prompt(data.idea, data.background, data.location)}
-    {get_tech_prompt(data.idea, data.background)}
-    {get_finance_prompt(data.idea, data.background)}
-    {get_critique_prompt(data.idea, data.background, data.location)}
 
-    Compile your queries. Respond STRICTLY with a single JSON object containing these exact keys:
-    "market_question", "tech_question", "finance_question", "critique_question"
-    """
-    
+    prompt = f"""
+You are a panel of 4 startup experts analyzing a founder's idea.
+
+{get_market_prompt(data.idea, data.background, data.location)}
+{get_tech_prompt(data.idea, data.background)}
+{get_finance_prompt(data.idea, data.background)}
+{get_critique_prompt(data.idea, data.background, data.location)}
+
+Respond ONLY with a valid JSON object with exactly these 4 keys:
+"market_question", "tech_question", "finance_question", "critique_question"
+
+Each value must be a single sharp question string. No preamble, no markdown, no extra keys.
+"""
+
     try:
         response = ai_model.generate_content(
-            prompt, 
+            prompt,
             generation_config={"response_mime_type": "application/json"}
         )
-        return json.loads(response.text)
+        raw = response.text.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback if JSON parsing fails
+        return {
+            "market_question": get_market_fallback(data.location),
+            "tech_question": get_tech_fallback(),
+            "finance_question": get_finance_fallback(),
+            "critique_question": get_critique_fallback()
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/evaluate-idea")
 async def evaluate_idea(data: EvaluationInput):
     ai_model = get_gemini_client()
-    
+
     if not ai_model:
         return {
-            "market_analysis": "Good localization choice. Demand looks steady based on background context.",
-            "tech_analysis": "Feasible setup. Recommend starting with a monolithic architecture to save deployment costs.",
-            "finance_analysis": "Bootstrapping is highly recommended here. Look into free tier tools first.",
-            "critique_analysis": "The biggest risk is customer acquisition cost. Ensure an organic loop exists.",
-            "roadmap": ["Build basic wireframe", "Launch landing page", "Collect first 20 beta users"]
+            "market_analysis": "Solid market potential. Validate demand through 10 user interviews before building.",
+            "tech_analysis": "Start monolithic. Avoid microservices until you hit real scaling pain.",
+            "finance_analysis": "Bootstrap first. Focus on unit economics from day one.",
+            "critique_analysis": "Biggest risk: building before validating. Talk to users first.",
+            "roadmap": [
+                "Interview 10 potential customers this week",
+                "Build the simplest possible version in 2 weeks",
+                "Get 5 paying users before writing more code"
+            ],
+            "scores": {"market": 7, "tech": 6, "finance": 6, "risk": 5}
         }
-        
-    prompt = f"""
-    Analyze the full startup interview breakdown below:
-    Context: Idea is '{data.idea}', target market is '{data.location}', founder background is '{data.background}'.
-    
-    Expert Follow-up Responses:
-    - Market/Locational Answer: {data.market_answer}
-    - Technical Feasibility Answer: {data.tech_answer}
-    - Financial Model Answer: {data.finance_answer}
-    - Critique/Risk Answer: {data.critique_answer}
 
-    Provide an intensive diagnostic report across all 4 sectors, plus a 3-step action roadmap.
-    Respond STRICTLY with a JSON object matching this schema exactly:
-    {{
-        "market_analysis": "string detailing local competition strategy",
-        "tech_analysis": "string detailing tech stack efficiency advice",
-        "finance_analysis": "string detailing monetization and unit economics",
-        "critique_analysis": "string exposing hidden risks or fatal flaws",
-        "roadmap": ["step 1 string", "step 2 string", "step 3 string"]
-    }}
-    """
+    prompt = f"""
+You are a senior startup analyst delivering a final diagnostic report.
+
+Startup: "{data.idea}"
+Location: {data.location}
+Founder Background: {data.background}
+
+Expert Interview Responses:
+- Market Answer: {data.market_answer}
+- Technical Answer: {data.tech_answer}
+- Financial Answer: {data.finance_answer}
+- Risk/Critique Answer: {data.critique_answer}
+
+Respond ONLY with a valid JSON object with exactly these keys:
+{{
+  "market_analysis": "2-3 sentence honest market assessment with actionable advice",
+  "tech_analysis": "2-3 sentence technical feasibility assessment with specific recommendations",
+  "finance_analysis": "2-3 sentence financial strategy assessment with concrete steps",
+  "critique_analysis": "2-3 sentence critical risk assessment with mitigation advice",
+  "roadmap": ["specific action step 1", "specific action step 2", "specific action step 3"],
+  "scores": {{
+    "market": <integer 1-10>,
+    "tech": <integer 1-10>,
+    "finance": <integer 1-10>,
+    "risk": <integer 1-10 where 10 means lowest risk>
+  }}
+}}
+
+Be honest, specific, and tactical. No generic advice. No markdown, no preamble.
+"""
+
     try:
         response = ai_model.generate_content(
-            prompt, 
+            prompt,
             generation_config={"response_mime_type": "application/json"}
         )
-        return json.loads(response.text)
+        raw = response.text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse AI response as JSON")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
